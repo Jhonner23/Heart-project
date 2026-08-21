@@ -23,9 +23,7 @@ pipeline = load_model()
 
 # ── Interfaz ─────────────────────────────────────────────────────────────────
 st.title("❤️ Predicción de Enfermedad Cardíaca")
-st.markdown(
-    "Ingresa los datos del paciente para obtener la predicción del modelo SVM entrenado."
-)
+st.markdown("Ingresa los datos del paciente para obtener la predicción del modelo SVM entrenado.")
 
 st.header("Datos del paciente")
 
@@ -36,12 +34,8 @@ with col1:
     rest_bp = st.number_input(
         "Presión arterial en reposo (mmHg)", min_value=80, max_value=220, value=120
     )
-    chol = st.number_input(
-        "Colesterol sérico (mg/dl)", min_value=100, max_value=600, value=240
-    )
-    max_hr = st.number_input(
-        "Frecuencia cardíaca máxima", min_value=60, max_value=220, value=150
-    )
+    chol = st.number_input("Colesterol sérico (mg/dl)", min_value=100, max_value=600, value=240)
+    max_hr = st.number_input("Frecuencia cardíaca máxima", min_value=60, max_value=220, value=150)
     old_peak = st.number_input(
         "Depresión ST inducida (old_peak)",
         min_value=0.0,
@@ -74,24 +68,18 @@ with col2:
     rest_ecg = st.selectbox(
         "Resultado ECG en reposo",
         options=[0, 1, 2],
-        format_func=lambda x: {0: "Normal", 1: "Anormalidad ST-T", 2: "Hipertrofia VI"}[
-            x
-        ],
+        format_func=lambda x: {0: "Normal", 1: "Anormalidad ST-T", 2: "Hipertrofia VI"}[x],
     )
     slope = st.selectbox(
         "Pendiente del segmento ST",
         options=[1, 2, 3],
         format_func=lambda x: {1: "Ascendente", 2: "Plana", 3: "Descendente"}[x],
     )
-    ca = st.selectbox(
-        "Vasos principales coloreados (fluoroscopía)", options=[0, 1, 2, 3]
-    )
+    ca = st.selectbox("Vasos principales coloreados (fluoroscopía)", options=[0, 1, 2, 3])
     thal = st.selectbox(
         "Talasemia",
         options=[3, 6, 7],
-        format_func=lambda x: {3: "Normal", 6: "Defecto fijo", 7: "Defecto reversible"}[
-            x
-        ],
+        format_func=lambda x: {3: "Normal", 6: "Defecto fijo", 7: "Defecto reversible"}[x],
     )
 
 # ── Predicción ────────────────────────────────────────────────────────────────
@@ -128,9 +116,7 @@ if st.button("🔍 Predecir", type="primary"):
 
     st.divider()
     if pred == 1:
-        st.error(
-            f"⚠️ **Resultado: Enfermedad cardíaca detectada** (probabilidad: {prob:.1%})"
-        )
+        st.error(f"⚠️ **Resultado: Enfermedad cardíaca detectada** (probabilidad: {prob:.1%})")
     else:
         st.success(
             f"✅ **Resultado: Sin enfermedad cardíaca** (probabilidad de enfermedad: {prob:.1%})"
