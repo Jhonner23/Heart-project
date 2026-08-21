@@ -15,7 +15,7 @@ st.set_page_config(
 
 
 @st.cache_resource
-def load_model():
+def load_model() -> object:
     return joblib.load(MODEL_PATH)
 
 
