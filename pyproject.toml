@@ -10,10 +10,13 @@ readme = "README.md"
 
 dependencies = [
     "joblib>=1.5.3",
+    "matplotlib>=3.11.1",
     "numpy>=2.5.2",
     "pandas>=3.0.5",
+    "pandera[pandas]>=0.32.1",
     "pyarrow>=25.0.1",
     "scikit-learn>=1.9.0",
+    "seaborn>=0.13.2",
     "streamlit>=1.62.0",
     "urllib3>=2.5.0",
 ]
@@ -30,6 +33,7 @@ dev = [
     "pytest-cookies>=0.7.0",
     "pytest-cov>=7.1.0",
     "cruft[pyproject]>=2.16.0",# Automated Cookiecutter template synchronization
+    "nbconvert>=7.17.1",
 ]
 
 #
