@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 # ── Configuración ────────────────────────────────────────────────────────────
-MODEL_PATH = Path(__file__).parent / "models" / "06_svm_model.joblib"
+MODEL_PATH = Path(__file__).parent / "models" / "06_rf_model.joblib"
 
 st.set_page_config(
     page_title="Predicción Enfermedad Cardíaca",
