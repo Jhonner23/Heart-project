@@ -23,7 +23,9 @@ pipeline = load_model()
 
 # ── Interfaz ─────────────────────────────────────────────────────────────────
 st.title("❤️ Predicción de Enfermedad Cardíaca")
-st.markdown("Ingresa los datos del paciente para obtener la predicción del modelo SVM entrenado.")
+st.markdown(
+    "Ingresa los datos del paciente para obtener la predicción del modelo Random Forest entrenado."
+)
 
 st.header("Datos del paciente")
 
@@ -42,6 +44,11 @@ with col1:
         max_value=10.0,
         value=1.0,
         step=0.1,
+    )
+    exang = st.selectbox(
+        "Angina inducida por ejercicio",
+        options=[0, 1],
+        format_func=lambda x: "No" if x == 0 else "Sí",
     )
 
 with col2:
@@ -92,6 +99,7 @@ if st.button("🔍 Predecir", type="primary"):
                 "chol": float(chol),
                 "max_hr": float(max_hr),
                 "old_peak": float(old_peak),
+                "exang": exang,
                 "sex": sex,
                 "chest_pain": chest_pain,
                 "fbs": fbs,
@@ -103,9 +111,8 @@ if st.button("🔍 Predecir", type="primary"):
         ]
     )
 
-    # Convertir tipos para compatibilidad con el pipeline
     num_cols = ["age", "rest_bp", "chol", "max_hr", "old_peak"]
-    cat_cols = ["sex", "chest_pain", "fbs", "rest_ecg", "slope", "ca", "thal"]
+    cat_cols = ["sex", "chest_pain", "fbs", "rest_ecg", "slope", "ca", "thal", "exang"]
     for col in num_cols:
         input_data[col] = input_data[col].astype(float)
     for col in cat_cols:
