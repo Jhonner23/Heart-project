@@ -1,14 +1,16 @@
-"""Feature pipeline: cleans and types raw heart-disease data into a feature table.
+"""Feature pipeline: transforms raw heart-disease data into model-ready features.
 
-Reads the raw CSV, drops exact duplicates and normalizes column types
-(numeric coercion, categorical as object), and persists the resulting table
-to the ``04_feature`` layer.
+Reads the raw CSV, creates a reproducible train/test split, fits a
+preprocessing pipeline (imputation + scaling for numeric columns, imputation
++ one-hot encoding for categorical columns) using ONLY the training rows,
+then applies that fitted preprocessor to the full dataset and persists the
+transformed feature matrix (with a ``split`` column and the target) plus the
+fitted preprocessor.
 
-This script does NOT fit or apply the numeric/categorical preprocessing
-(imputation, scaling, one-hot encoding) — doing that here, before the
-train/test split, would leak test-set statistics (feature means, categories)
-into training. ``build_preprocessor`` is exposed so ``training_pipeline.py``
-can fit it on ``X_train`` only, after splitting.
+Fitting on train-only rows (not the full dataset) avoids leaking test-set
+statistics into the preprocessing step. ``training_pipeline.py`` reuses the
+persisted ``split`` column instead of re-randomizing, so every pipeline that
+reads this feature table sees the exact same train/test partition.
 
 Data-quality validation (Pandera schema, null-rate checks, etc.) is added on
 top of this script in the "Data Validation & Data Integrity" task.
@@ -20,9 +22,11 @@ import argparse
 import logging
 from pathlib import Path
 
+import joblib
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
@@ -41,18 +45,19 @@ CAT_COLS: list[str] = [
     "exang",
 ]
 TARGET: str = "disease"
+SPLIT_COL: str = "split"
+
+RANDOM_STATE: int = 42
+TEST_SIZE: float = 0.2
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 DEFAULT_RAW_PATH = ROOT_DIR / "data" / "01_raw" / "corazon.csv"
 DEFAULT_FEATURES_PATH = ROOT_DIR / "data" / "04_feature" / "corazon_features.parquet"
+DEFAULT_PIPELINE_PATH = ROOT_DIR / "models" / "feature_pipeline.pkl"
 
 
 def build_preprocessor() -> ColumnTransformer:
-    """Build the (unfitted) numeric + categorical preprocessing pipeline.
-
-    Not fit here on purpose: ``training_pipeline.py`` must fit this only on
-    the training split to avoid leaking test-set statistics.
-    """
+    """Build the (unfitted) numeric + categorical preprocessing pipeline."""
     numeric_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
@@ -62,7 +67,7 @@ def build_preprocessor() -> ColumnTransformer:
     categorical_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("encoder", OneHotEncoder(handle_unknown="ignore")),
+            ("encoder", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
         ]
     )
     return ColumnTransformer(
@@ -76,8 +81,10 @@ def build_preprocessor() -> ColumnTransformer:
 def load_raw_data(raw_path: Path) -> pd.DataFrame:
     """Load the raw CSV and apply the minimal, deterministic type fixes.
 
-    Only structural cleanup lives here (duplicates, numeric coercion). Data
-    *validation* (rejecting bad data) belongs to the validation task.
+    Only structural cleanup lives here (duplicates, numeric coercion, and
+    dropping rows with no usable target — a row without a valid label can't
+    be used for supervised learning regardless of any later validation
+    rules). Rejecting bad *feature* values belongs to the validation task.
     """
     df = pd.read_csv(raw_path)
     df = df.drop_duplicates().reset_index(drop=True)
@@ -91,40 +98,92 @@ def load_raw_data(raw_path: Path) -> pd.DataFrame:
     for col in CAT_COLS:
         df[col] = df[col].astype(object)
 
+    df[TARGET] = pd.to_numeric(df[TARGET], errors="coerce")
+    n_before_target_filter = len(df)
+    df = df.dropna(subset=[TARGET]).reset_index(drop=True)
+    if len(df) < n_before_target_filter:
+        logger.warning(
+            "Dropped %d rows with missing/invalid target (%s)",
+            n_before_target_filter - len(df),
+            TARGET,
+        )
+    df[TARGET] = df[TARGET].astype(int)
+
     return df
 
 
 def run_feature_pipeline(
     raw_path: Path = DEFAULT_RAW_PATH,
     features_path: Path = DEFAULT_FEATURES_PATH,
+    pipeline_path: Path = DEFAULT_PIPELINE_PATH,
 ) -> pd.DataFrame:
-    """Run the feature pipeline: load -> clean -> persist the feature table.
+    """Run the full feature pipeline: load -> split -> fit(train) -> transform(all) -> persist.
 
-    Returns the cleaned DataFrame that was persisted. Fitting the
-    preprocessor (scaling/encoding) happens later, in the training pipeline,
-    after the train/test split.
+    Returns the transformed feature DataFrame (one column per encoded
+    feature, plus ``TARGET`` and ``SPLIT_COL``) that was persisted to
+    ``features_path``.
     """
     logger.info("Loading raw data from %s", raw_path)
     df = load_raw_data(raw_path)
 
-    features_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(features_path, index=False)
+    features = df.drop(columns=[TARGET])
+    target = df[TARGET]
 
-    logger.info("Saved feature table (%d rows) to %s", len(df), features_path)
-    return df
+    train_idx, test_idx = train_test_split(
+        df.index,
+        test_size=TEST_SIZE,
+        random_state=RANDOM_STATE,
+        stratify=target,
+    )
+    split = pd.Series(SPLIT_COL, index=df.index, dtype=object)
+    split.loc[train_idx] = "train"
+    split.loc[test_idx] = "test"
+
+    preprocessor = build_preprocessor()
+    logger.info(
+        "Fitting preprocessor on %d training rows (of %d total)",
+        len(train_idx),
+        len(df),
+    )
+    preprocessor.fit(features.loc[train_idx])
+
+    # transform (not fit_transform) on the FULL dataset: reuses train-only
+    # statistics, so no test-set information leaks into imputation/scaling.
+    transformed = preprocessor.transform(features)
+    feature_names = preprocessor.get_feature_names_out()
+
+    features_df = pd.DataFrame(transformed, columns=feature_names, index=df.index)
+    features_df[TARGET] = target
+    features_df[SPLIT_COL] = split
+    features_df = features_df.reset_index(drop=True)
+
+    features_path.parent.mkdir(parents=True, exist_ok=True)
+    pipeline_path.parent.mkdir(parents=True, exist_ok=True)
+
+    features_df.to_parquet(features_path, index=False)
+    joblib.dump(preprocessor, pipeline_path)
+
+    logger.info("Saved %d transformed features to %s", len(feature_names), features_path)
+    logger.info("Saved fitted preprocessor to %s", pipeline_path)
+    return features_df
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the feature pipeline.")
     parser.add_argument("--raw-path", type=Path, default=DEFAULT_RAW_PATH)
     parser.add_argument("--features-path", type=Path, default=DEFAULT_FEATURES_PATH)
+    parser.add_argument("--pipeline-path", type=Path, default=DEFAULT_PIPELINE_PATH)
     return parser.parse_args()
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = _parse_args()
-    run_feature_pipeline(raw_path=args.raw_path, features_path=args.features_path)
+    run_feature_pipeline(
+        raw_path=args.raw_path,
+        features_path=args.features_path,
+        pipeline_path=args.pipeline_path,
+    )
 
 
 if __name__ == "__main__":
