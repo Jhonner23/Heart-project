@@ -44,3 +44,8 @@ repos:
       - id: commitizen
       - id: commitizen-branch
         stages: [pre-push]
+
+  - repo: https://github.com/pypa/pip-audit
+    rev: v2.10.1
+    hooks:
+      - id: pip-audit

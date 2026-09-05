@@ -34,6 +34,9 @@ dev = [
     "pytest-cov>=7.1.0",
     "cruft[pyproject]>=2.16.0",# Automated Cookiecutter template synchronization
     "nbconvert>=7.17.1",
+    "ruff>=0.16.6",
+    "mypy>=2.3.1",
+    "pip-audit>=2.10.1",
 ]
 
 #
