@@ -1,14 +1,17 @@
-"""Feature pipeline: transforms raw heart-disease data into model-ready features.
+"""Feature pipeline: cleans and types raw heart-disease data into a feature table.
 
-Reads the raw CSV, fits a preprocessing pipeline (imputation + scaling for
-numeric columns, imputation + one-hot encoding for categorical columns) and
-persists both the transformed dataset and the fitted preprocessor so that
-``training_pipeline.py`` and ``inference_pipeline.py`` can reuse the exact
-same transformations.
+Reads the raw CSV, drops exact duplicates and normalizes column types
+(numeric coercion, categorical as object), and persists the resulting table
+to the ``04_feature`` layer.
+
+This script does NOT fit or apply the numeric/categorical preprocessing
+(imputation, scaling, one-hot encoding) — doing that here, before the
+train/test split, would leak test-set statistics (feature means, categories)
+into training. ``build_preprocessor`` is exposed so ``training_pipeline.py``
+can fit it on ``X_train`` only, after splitting.
 
 Data-quality validation (Pandera schema, null-rate checks, etc.) is added on
-top of this script in the "Data Validation & Data Integrity" task; this
-version focuses on the autonomous feature transformation itself.
+top of this script in the "Data Validation & Data Integrity" task.
 """
 
 from __future__ import annotations
@@ -17,7 +20,6 @@ import argparse
 import logging
 from pathlib import Path
 
-import joblib
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
@@ -43,11 +45,14 @@ TARGET: str = "disease"
 ROOT_DIR = Path(__file__).resolve().parents[3]
 DEFAULT_RAW_PATH = ROOT_DIR / "data" / "01_raw" / "corazon.csv"
 DEFAULT_FEATURES_PATH = ROOT_DIR / "data" / "04_feature" / "corazon_features.parquet"
-DEFAULT_PIPELINE_PATH = ROOT_DIR / "models" / "feature_pipeline.pkl"
 
 
 def build_preprocessor() -> ColumnTransformer:
-    """Build the (unfitted) numeric + categorical preprocessing pipeline."""
+    """Build the (unfitted) numeric + categorical preprocessing pipeline.
+
+    Not fit here on purpose: ``training_pipeline.py`` must fit this only on
+    the training split to avoid leaking test-set statistics.
+    """
     numeric_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
@@ -92,29 +97,20 @@ def load_raw_data(raw_path: Path) -> pd.DataFrame:
 def run_feature_pipeline(
     raw_path: Path = DEFAULT_RAW_PATH,
     features_path: Path = DEFAULT_FEATURES_PATH,
-    pipeline_path: Path = DEFAULT_PIPELINE_PATH,
 ) -> pd.DataFrame:
-    """Run the full feature pipeline: load -> fit preprocessor -> persist.
+    """Run the feature pipeline: load -> clean -> persist the feature table.
 
-    Returns the (untransformed, but cleaned) DataFrame that was persisted,
-    which is what downstream pipelines read back from ``features_path``.
+    Returns the cleaned DataFrame that was persisted. Fitting the
+    preprocessor (scaling/encoding) happens later, in the training pipeline,
+    after the train/test split.
     """
     logger.info("Loading raw data from %s", raw_path)
     df = load_raw_data(raw_path)
 
-    features = df.drop(columns=[TARGET])
-    preprocessor = build_preprocessor()
-    logger.info("Fitting preprocessor on %d rows", len(features))
-    preprocessor.fit(features)
-
     features_path.parent.mkdir(parents=True, exist_ok=True)
-    pipeline_path.parent.mkdir(parents=True, exist_ok=True)
-
     df.to_parquet(features_path, index=False)
-    joblib.dump(preprocessor, pipeline_path)
 
-    logger.info("Saved features to %s", features_path)
-    logger.info("Saved fitted preprocessor to %s", pipeline_path)
+    logger.info("Saved feature table (%d rows) to %s", len(df), features_path)
     return df
 
 
@@ -122,18 +118,13 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the feature pipeline.")
     parser.add_argument("--raw-path", type=Path, default=DEFAULT_RAW_PATH)
     parser.add_argument("--features-path", type=Path, default=DEFAULT_FEATURES_PATH)
-    parser.add_argument("--pipeline-path", type=Path, default=DEFAULT_PIPELINE_PATH)
     return parser.parse_args()
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = _parse_args()
-    run_feature_pipeline(
-        raw_path=args.raw_path,
-        features_path=args.features_path,
-        pipeline_path=args.pipeline_path,
-    )
+    run_feature_pipeline(raw_path=args.raw_path, features_path=args.features_path)
 
 
 if __name__ == "__main__":

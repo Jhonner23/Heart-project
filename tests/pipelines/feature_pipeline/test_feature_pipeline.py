@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
 import pytest
@@ -111,20 +110,12 @@ def test_build_preprocessor_handles_unseen_category_at_inference(
     assert transformed.shape[0] == 1
 
 
-def test_run_feature_pipeline_persists_features_and_preprocessor(
-    tmp_path: Path, sample_raw_csv: Path
-) -> None:
+def test_run_feature_pipeline_persists_feature_table(tmp_path: Path, sample_raw_csv: Path) -> None:
     features_path = tmp_path / "out" / "features.parquet"
-    pipeline_path = tmp_path / "out" / "feature_pipeline.pkl"
 
-    result_df = run_feature_pipeline(
-        raw_path=sample_raw_csv,
-        features_path=features_path,
-        pipeline_path=pipeline_path,
-    )
+    result_df = run_feature_pipeline(raw_path=sample_raw_csv, features_path=features_path)
 
     assert features_path.exists()
-    assert pipeline_path.exists()
 
     persisted_df = pd.read_parquet(features_path)
     # check_dtype=False: parquet round-trips object columns as pandas'
@@ -134,8 +125,3 @@ def test_run_feature_pipeline_persists_features_and_preprocessor(
         persisted_df.reset_index(drop=True),
         check_dtype=False,
     )
-
-    fitted_preprocessor = joblib.load(pipeline_path)
-    sample_features = persisted_df.drop(columns=[TARGET]).iloc[[0]]
-    transformed = fitted_preprocessor.transform(sample_features)
-    assert transformed.shape[0] == 1
