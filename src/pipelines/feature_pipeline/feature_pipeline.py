@@ -1,14 +1,19 @@
 """Feature pipeline: transforms raw heart-disease data into model-ready features.
 
-Reads the raw CSV, fits a preprocessing pipeline (imputation + scaling for
-numeric columns, imputation + one-hot encoding for categorical columns) and
-persists both the transformed dataset and the fitted preprocessor so that
-``training_pipeline.py`` and ``inference_pipeline.py`` can reuse the exact
-same transformations.
+Reads the raw CSV, creates a reproducible train/test split, fits a
+preprocessing pipeline (imputation + scaling for numeric columns, imputation
++ one-hot encoding for categorical columns) using ONLY the training rows,
+then applies that fitted preprocessor to the full dataset and persists the
+transformed feature matrix (with a ``split`` column and the target) plus the
+fitted preprocessor.
+
+Fitting on train-only rows (not the full dataset) avoids leaking test-set
+statistics into the preprocessing step. ``training_pipeline.py`` reuses the
+persisted ``split`` column instead of re-randomizing, so every pipeline that
+reads this feature table sees the exact same train/test partition.
 
 Data-quality validation (Pandera schema, null-rate checks, etc.) is added on
-top of this script in the "Data Validation & Data Integrity" task; this
-version focuses on the autonomous feature transformation itself.
+top of this script in the "Data Validation & Data Integrity" task.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ import joblib
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
@@ -39,6 +45,10 @@ CAT_COLS: list[str] = [
     "exang",
 ]
 TARGET: str = "disease"
+SPLIT_COL: str = "split"
+
+RANDOM_STATE: int = 42
+TEST_SIZE: float = 0.2
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 DEFAULT_RAW_PATH = ROOT_DIR / "data" / "01_raw" / "corazon.csv"
@@ -57,7 +67,7 @@ def build_preprocessor() -> ColumnTransformer:
     categorical_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("encoder", OneHotEncoder(handle_unknown="ignore")),
+            ("encoder", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
         ]
     )
     return ColumnTransformer(
@@ -71,8 +81,10 @@ def build_preprocessor() -> ColumnTransformer:
 def load_raw_data(raw_path: Path) -> pd.DataFrame:
     """Load the raw CSV and apply the minimal, deterministic type fixes.
 
-    Only structural cleanup lives here (duplicates, numeric coercion). Data
-    *validation* (rejecting bad data) belongs to the validation task.
+    Only structural cleanup lives here (duplicates, numeric coercion, and
+    dropping rows with no usable target — a row without a valid label can't
+    be used for supervised learning regardless of any later validation
+    rules). Rejecting bad *feature* values belongs to the validation task.
     """
     df = pd.read_csv(raw_path)
     df = df.drop_duplicates().reset_index(drop=True)
@@ -86,6 +98,17 @@ def load_raw_data(raw_path: Path) -> pd.DataFrame:
     for col in CAT_COLS:
         df[col] = df[col].astype(object)
 
+    df[TARGET] = pd.to_numeric(df[TARGET], errors="coerce")
+    n_before_target_filter = len(df)
+    df = df.dropna(subset=[TARGET]).reset_index(drop=True)
+    if len(df) < n_before_target_filter:
+        logger.warning(
+            "Dropped %d rows with missing/invalid target (%s)",
+            n_before_target_filter - len(df),
+            TARGET,
+        )
+    df[TARGET] = df[TARGET].astype(int)
+
     return df
 
 
@@ -94,28 +117,55 @@ def run_feature_pipeline(
     features_path: Path = DEFAULT_FEATURES_PATH,
     pipeline_path: Path = DEFAULT_PIPELINE_PATH,
 ) -> pd.DataFrame:
-    """Run the full feature pipeline: load -> fit preprocessor -> persist.
+    """Run the full feature pipeline: load -> split -> fit(train) -> transform(all) -> persist.
 
-    Returns the (untransformed, but cleaned) DataFrame that was persisted,
-    which is what downstream pipelines read back from ``features_path``.
+    Returns the transformed feature DataFrame (one column per encoded
+    feature, plus ``TARGET`` and ``SPLIT_COL``) that was persisted to
+    ``features_path``.
     """
     logger.info("Loading raw data from %s", raw_path)
     df = load_raw_data(raw_path)
 
     features = df.drop(columns=[TARGET])
+    target = df[TARGET]
+
+    train_idx, test_idx = train_test_split(
+        df.index,
+        test_size=TEST_SIZE,
+        random_state=RANDOM_STATE,
+        stratify=target,
+    )
+    split = pd.Series(SPLIT_COL, index=df.index, dtype=object)
+    split.loc[train_idx] = "train"
+    split.loc[test_idx] = "test"
+
     preprocessor = build_preprocessor()
-    logger.info("Fitting preprocessor on %d rows", len(features))
-    preprocessor.fit(features)
+    logger.info(
+        "Fitting preprocessor on %d training rows (of %d total)",
+        len(train_idx),
+        len(df),
+    )
+    preprocessor.fit(features.loc[train_idx])
+
+    # transform (not fit_transform) on the FULL dataset: reuses train-only
+    # statistics, so no test-set information leaks into imputation/scaling.
+    transformed = preprocessor.transform(features)
+    feature_names = preprocessor.get_feature_names_out()
+
+    features_df = pd.DataFrame(transformed, columns=feature_names, index=df.index)
+    features_df[TARGET] = target
+    features_df[SPLIT_COL] = split
+    features_df = features_df.reset_index(drop=True)
 
     features_path.parent.mkdir(parents=True, exist_ok=True)
     pipeline_path.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_parquet(features_path, index=False)
+    features_df.to_parquet(features_path, index=False)
     joblib.dump(preprocessor, pipeline_path)
 
-    logger.info("Saved features to %s", features_path)
+    logger.info("Saved %d transformed features to %s", len(feature_names), features_path)
     logger.info("Saved fitted preprocessor to %s", pipeline_path)
-    return df
+    return features_df
 
 
 def _parse_args() -> argparse.Namespace:

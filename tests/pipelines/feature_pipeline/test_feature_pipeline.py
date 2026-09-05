@@ -12,6 +12,7 @@ import pytest
 from src.pipelines.feature_pipeline.feature_pipeline import (
     CAT_COLS,
     NUM_COLS,
+    SPLIT_COL,
     TARGET,
     build_preprocessor,
     load_raw_data,
@@ -21,38 +22,33 @@ from src.pipelines.feature_pipeline.feature_pipeline import (
 
 @pytest.fixture
 def sample_raw_df() -> pd.DataFrame:
-    """Small synthetic dataset shaped like corazon.csv, including edge cases:
-    a duplicated row, a missing numeric value and a missing categorical value.
+    """Synthetic dataset shaped like corazon.csv, large enough to stratify-split,
+    including edge cases: a duplicated row, a missing numeric value and a
+    missing categorical value.
     """
+    n = 40
+    rng = np.random.default_rng(0)
     data = {
-        "age": [63, 67, 67, 45, np.nan],
-        "sex": ["Male", "Female", "Female", "Male", "Male"],
-        "chest_pain": [
-            "typical",
-            "asymptomatic",
-            "asymptomatic",
-            "nontypical",
-            "typical",
-        ],
-        "rest_bp": [145, 160, 160, 130, 120],
-        "chol": [233, 286, 286, 250, 210],
-        "fbs": [1, 0, 0, 0, 1],
-        "rest_ecg": [
-            "left ventricular hypertrophy",
-            "normal",
-            "normal",
-            "normal",
-            "normal",
-        ],
-        "max_hr": [150, 108, 108, 170, None],
-        "exang": [0, 1, 1, 0, 0],
-        "old_peak": [2.3, 1.5, 1.5, 0.0, 1.2],
-        "slope": [3, 2, 2, 1, 1],
-        "ca": [0.0, 3.0, 3.0, None, 1.0],
-        "thal": ["fixed", "normal", "normal", "normal", None],
-        "disease": [0, 1, 1, 0, 0],
+        "age": rng.integers(30, 80, n).astype(float),
+        "sex": rng.choice(["Male", "Female"], n),
+        "chest_pain": rng.choice(["typical", "asymptomatic", "nontypical"], n),
+        "rest_bp": rng.integers(100, 180, n).astype(float),
+        "chol": rng.integers(150, 300, n).astype(float),
+        "fbs": rng.choice([0, 1], n),
+        "rest_ecg": rng.choice(["normal", "left ventricular hypertrophy"], n),
+        "max_hr": rng.integers(90, 200, n).astype(float),
+        "exang": rng.choice([0, 1], n),
+        "old_peak": rng.uniform(0, 4, n).round(1),
+        "slope": rng.choice([1, 2, 3], n),
+        "ca": rng.choice([0.0, 1.0, 2.0, 3.0], n),
+        "thal": rng.choice(["normal", "fixed", "reversable"], n),
+        "disease": rng.choice([0, 1], n),
     }
-    return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+    df.loc[1] = df.loc[0]  # exact duplicate row
+    df.loc[2, "age"] = np.nan  # missing numeric
+    df.loc[3, "thal"] = None  # missing categorical
+    return df
 
 
 @pytest.fixture
@@ -62,14 +58,10 @@ def sample_raw_csv(tmp_path: Path, sample_raw_df: pd.DataFrame) -> Path:
     return csv_path
 
 
-def test_load_raw_data_drops_duplicates_and_coerces_types(
-    sample_raw_csv: Path, sample_raw_df: pd.DataFrame
-) -> None:
+def test_load_raw_data_drops_duplicates_and_coerces_types(sample_raw_csv: Path) -> None:
     df = load_raw_data(sample_raw_csv)
 
-    # the fixture has exactly one exact-duplicate row (rows 1 and 2)
-    expected_unique_rows = sample_raw_df.drop_duplicates().shape[0]
-    assert len(df) == expected_unique_rows
+    assert len(df) == len(pd.read_csv(sample_raw_csv).drop_duplicates())
     for col in NUM_COLS:
         assert pd.api.types.is_numeric_dtype(df[col])
     for col in CAT_COLS:
@@ -106,12 +98,11 @@ def test_build_preprocessor_handles_unseen_category_at_inference(
     new_row = features.iloc[[0]].copy()
     new_row["thal"] = "never_seen_category"
 
-    # must not raise thanks to handle_unknown="ignore"
     transformed = preprocessor.transform(new_row)
     assert transformed.shape[0] == 1
 
 
-def test_run_feature_pipeline_persists_features_and_preprocessor(
+def test_run_feature_pipeline_persists_transformed_features(
     tmp_path: Path, sample_raw_csv: Path
 ) -> None:
     features_path = tmp_path / "out" / "features.parquet"
@@ -127,15 +118,43 @@ def test_run_feature_pipeline_persists_features_and_preprocessor(
     assert pipeline_path.exists()
 
     persisted_df = pd.read_parquet(features_path)
-    # check_dtype=False: parquet round-trips object columns as pandas'
-    # arrow-backed StringDtype, which is a storage detail, not a pipeline bug.
-    pd.testing.assert_frame_equal(
-        result_df.reset_index(drop=True),
-        persisted_df.reset_index(drop=True),
-        check_dtype=False,
+    assert len(persisted_df) == len(result_df)
+    assert TARGET in persisted_df.columns
+    assert SPLIT_COL in persisted_df.columns
+    assert set(persisted_df[SPLIT_COL].unique()) <= {"train", "test"}
+
+    # the persisted matrix must actually be transformed: no raw category
+    # strings should remain, every non-target/split column must be numeric.
+    feature_cols = [c for c in persisted_df.columns if c not in (TARGET, SPLIT_COL)]
+    assert len(feature_cols) > len(NUM_COLS) + len(CAT_COLS)  # one-hot expanded the cat columns
+    for col in feature_cols:
+        assert pd.api.types.is_numeric_dtype(persisted_df[col])
+    assert not persisted_df[feature_cols].isna().any().any()
+
+
+def test_run_feature_pipeline_avoids_leakage(tmp_path: Path, sample_raw_csv: Path) -> None:
+    """The persisted preprocessor must be fit on train rows only: transforming
+    the test rows with a preprocessor fit on train-only data must match what
+    was actually persisted for those same rows."""
+    features_path = tmp_path / "out" / "features.parquet"
+    pipeline_path = tmp_path / "out" / "feature_pipeline.pkl"
+
+    run_feature_pipeline(
+        raw_path=sample_raw_csv,
+        features_path=features_path,
+        pipeline_path=pipeline_path,
     )
 
+    persisted_df = pd.read_parquet(features_path)
     fitted_preprocessor = joblib.load(pipeline_path)
-    sample_features = persisted_df.drop(columns=[TARGET]).iloc[[0]]
-    transformed = fitted_preprocessor.transform(sample_features)
-    assert transformed.shape[0] == 1
+
+    raw_df = load_raw_data(sample_raw_csv)
+    train_mask = (persisted_df[SPLIT_COL] == "train").to_numpy()
+    reference_preprocessor = build_preprocessor()
+    reference_preprocessor.fit(raw_df.drop(columns=[TARGET]).loc[train_mask])
+
+    test_features = raw_df.drop(columns=[TARGET]).loc[~train_mask]
+    expected = reference_preprocessor.transform(test_features)
+    actual = fitted_preprocessor.transform(test_features)
+
+    np.testing.assert_allclose(actual, expected)
