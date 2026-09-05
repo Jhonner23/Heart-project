@@ -17,19 +17,20 @@ from src.pipelines.feature_pipeline.feature_pipeline import (
     SPLIT_COL,
     TARGET,
     DataValidationError,
-    _check_heart_rate_integrity,
     build_preprocessor,
+    clean_invalid_rows,
     load_raw_data,
     run_feature_pipeline,
     validate_raw_data,
 )
 
+EXPECTED_ROWS_AFTER_DEDUP = 4
+EXPECTED_ROWS_AFTER_TARGET_FILTER = 2
+
+
 # --------------------------------------------------------------------------
 # Fixtures / helpers
 # --------------------------------------------------------------------------
-
-EXPECTED_ROWS_AFTER_DEDUP = 4
-EXPECTED_ROWS_AFTER_TARGET_FILTER = 2
 
 
 @pytest.fixture
@@ -144,15 +145,17 @@ def test_load_raw_data_raises_on_missing_columns(tmp_path: Path) -> None:
 
 
 def test_load_raw_data_drops_rows_with_invalid_target(tmp_path: Path, sample_raw_csv: Path) -> None:
-    # Corrupt the CSV as text so we never hit pandas' in-memory dtype
-    # strictness - this also better mirrors how a real corrupted export
-    # would look on disk.
+    # Rows 1 and 2 of the fixture (index 1, 2) are an exact-duplicate pair -
+    # corrupt rows 0 and 3 instead, so the duplicate pair stays intact and
+    # dedup still collapses it as expected. Corrupt the CSV as text so we
+    # never hit pandas' in-memory dtype strictness.
     lines = sample_raw_csv.read_text().splitlines()
     header = lines[0].split(",")
     disease_idx = header.index("disease")
     rows = [line.split(",") for line in lines[1:]]
     rows[0][disease_idx] = ""  # missing target
     rows[3][disease_idx] = "not_a_number"  # garbage target
+
     corrupted = tmp_path / "bad_target.csv"
     corrupted.write_text(",".join(header) + "\n" + "\n".join(",".join(r) for r in rows) + "\n")
 
@@ -196,37 +199,16 @@ def test_build_preprocessor_handles_unseen_category_at_inference(
 
 
 # --------------------------------------------------------------------------
-# validate_raw_data
+# validate_raw_data (strict gate, no recovery)
 # --------------------------------------------------------------------------
 
 
 def test_validate_raw_data_passes_clean_data(sample_raw_csv: Path) -> None:
     df = load_raw_data(sample_raw_csv)
-    validated = validate_raw_data(df)
+    df = clean_invalid_rows(df)
 
-    assert len(validated) == len(df)
-
-
-def test_validate_raw_data_drops_rows_below_invalid_threshold(tmp_path: Path) -> None:
-    df = _build_valid_rows(20)
-    df.loc[0, "sex"] = "9999"  # 1/20 = 5% -> below MAX_INVALID_ROW_FRACTION
-    csv_path = _write_csv(df, tmp_path, "mostly_valid.csv")
-
-    loaded = load_raw_data(csv_path)
-    validated = validate_raw_data(loaded)
-
-    assert len(validated) == len(loaded) - 1
-
-
-def test_validate_raw_data_raises_when_too_many_rows_invalid(tmp_path: Path) -> None:
-    df = _build_valid_rows(20)
-    n_corrupt = int(len(df) * (MAX_INVALID_ROW_FRACTION + 0.2))
-    df.loc[: n_corrupt - 1, "sex"] = "9999"  # well above MAX_INVALID_ROW_FRACTION
-    csv_path = _write_csv(df, tmp_path, "mostly_invalid.csv")
-
-    loaded = load_raw_data(csv_path)
-    with pytest.raises(DataValidationError, match="failed schema validation"):
-        validate_raw_data(loaded)
+    # must not raise
+    validate_raw_data(df)
 
 
 def test_validate_raw_data_raises_when_null_rate_too_high(tmp_path: Path) -> None:
@@ -241,16 +223,40 @@ def test_validate_raw_data_raises_when_null_rate_too_high(tmp_path: Path) -> Non
 
 
 # --------------------------------------------------------------------------
-# _check_heart_rate_integrity
+# clean_invalid_rows (recoverable cleaning step, includes heart-rate rule)
 # --------------------------------------------------------------------------
 
 
-def test_check_heart_rate_integrity_drops_violating_rows() -> None:
+def test_clean_invalid_rows_drops_rows_below_invalid_threshold(tmp_path: Path) -> None:
+    df = _build_valid_rows(20)
+    df.loc[0, "sex"] = "9999"  # 1/20 = 5% -> below MAX_INVALID_ROW_FRACTION
+    csv_path = _write_csv(df, tmp_path, "mostly_valid.csv")
+
+    loaded = load_raw_data(csv_path)
+    cleaned = clean_invalid_rows(loaded)
+
+    assert len(cleaned) == len(loaded) - 1
+    # cleaned data must now pass the strict validation gate
+    validate_raw_data(cleaned)
+
+
+def test_clean_invalid_rows_raises_when_too_many_rows_invalid(tmp_path: Path) -> None:
+    df = _build_valid_rows(20)
+    n_corrupt = int(len(df) * (MAX_INVALID_ROW_FRACTION + 0.2))
+    df.loc[: n_corrupt - 1, "sex"] = "9999"  # well above MAX_INVALID_ROW_FRACTION
+    csv_path = _write_csv(df, tmp_path, "mostly_invalid.csv")
+
+    loaded = load_raw_data(csv_path)
+    with pytest.raises(DataValidationError, match="failed schema checks"):
+        clean_invalid_rows(loaded)
+
+
+def test_clean_invalid_rows_drops_heart_rate_integrity_violations() -> None:
     df = _build_valid_rows(5)
     df.loc[0, "age"] = 70
     df.loc[0, "max_hr"] = 200  # 220 - 70 + 20 = 170 -> 200 violates the rule
 
-    result = _check_heart_rate_integrity(df)
+    result = clean_invalid_rows(df)
 
     assert len(result) == len(df) - 1
 
