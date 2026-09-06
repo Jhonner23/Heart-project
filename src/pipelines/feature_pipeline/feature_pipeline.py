@@ -131,7 +131,7 @@ def build_preprocessor() -> ColumnTransformer:
     )
 
 
-def _normalize_categorical(value: object) -> object:
+def normalize_categorical(value: object) -> object:
     if pd.isna(value):
         return np.nan
     text = str(value).strip()
@@ -159,7 +159,7 @@ def load_raw_data(raw_path: Path) -> pd.DataFrame:
         # .astype(object) pins the dtype explicitly: some pandas versions
         # infer a string extension dtype from .map() instead of plain
         # object, which RAW_SCHEMA's object columns don't match.
-        df[col] = df[col].map(_normalize_categorical).astype(object)
+        df[col] = df[col].map(normalize_categorical).astype(object)
 
     df[TARGET] = pd.to_numeric(df[TARGET], errors="coerce")
     n_before_target_filter = len(df)
