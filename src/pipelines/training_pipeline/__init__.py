@@ -3,18 +3,21 @@ from src.pipelines.training_pipeline.train_pipeline import (
     SPLIT_COL,
     TARGET,
     TrainingDataError,
+    TrainTestSplitError,
     build_model,
     evaluate_model,
     load_features,
     run_train_pipeline,
     split_train_test,
     train_model,
+    validate_train_test_split,
 )
 
 __all__ = [
     "MODEL_PARAMS",
     "SPLIT_COL",
     "TARGET",
+    "TrainTestSplitError",
     "TrainingDataError",
     "build_model",
     "evaluate_model",
@@ -22,4 +25,5 @@ __all__ = [
     "run_train_pipeline",
     "split_train_test",
     "train_model",
+    "validate_train_test_split",
 ]
