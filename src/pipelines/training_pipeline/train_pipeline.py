@@ -48,6 +48,32 @@ heavier frameworks:
   test (this dataset's split is already stratified, so this mostly acts as
   a regression check that stratification didn't silently break). Also a
   warning, not fatal.
+
+Model validation (``cross_validate_model`` / ``analyze_generalization``):
+estimates how well the model generalizes, beyond a single train/test split.
+- Cross-validation strategy: ``StratifiedKFold``, not plain ``KFold`` or
+  ``TimeSeriesSplit``. Plain K-Fold could produce folds with a very
+  different positive-class rate than the whole training set (this dataset
+  isn't huge, so that risk is real); ``TimeSeriesSplit`` doesn't apply -
+  these are independent patient records with no temporal ordering to
+  respect, unlike e.g. sequential sensor readings.
+- Comparison: in-sample train score (fit and scored on the same training
+  data - an optimistic upper bound), cross-validated score (mean +/- std
+  across folds, fit on each fold's training portion and scored on its held
+  -out portion - the real generalization estimate) and the held-out test
+  score (the final, single, honest estimate) are reported side by side,
+  both in ``train_metrics.json`` and as a bar-chart image
+  (``plot_train_cv_test_comparison``) so the comparison is visible without
+  reading JSON.
+- Overfitting/underfitting analysis (``analyze_generalization``): compares
+  the in-sample train F1 against the cross-validated F1. A large gap
+  (train much higher) means the model is memorizing training data more
+  than it's learning a generalizable pattern - overfitting. Both scores
+  being low means the model isn't fitting the training data well enough
+  even in-sample - underfitting. Each case logs a warning with concrete
+  next steps (e.g. reduce ``max_depth`` / increase ``min_samples_split``
+  for overfitting; increase model capacity or revisit features for
+  underfitting), not just a flag.
 """
 
 from __future__ import annotations
@@ -59,6 +85,10 @@ from pathlib import Path
 from typing import Any
 
 import joblib
+import matplotlib
+
+matplotlib.use("Agg")  # headless: this script never needs an interactive display
+import matplotlib.pyplot as plt
 import pandas as pd
 from scipy import stats
 from sklearn.ensemble import RandomForestClassifier
@@ -70,6 +100,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
+from sklearn.model_selection import StratifiedKFold, cross_validate
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +118,17 @@ MAX_LABEL_DRIFT: float = 0.15
 # How many leaked indices to list in the error message before truncating.
 MAX_LEAKED_INDICES_SHOWN: int = 10
 
+# Model-validation settings (see module docstring).
+CV_FOLDS: int = 5
+CV_SCORING: list[str] = ["accuracy", "precision", "recall", "f1", "roc_auc"]
+GENERALIZATION_PRIMARY_METRIC: str = "f1"
+# Gap (in-sample train score minus cross-validated score) above which the
+# model is flagged as overfitting.
+MAX_TRAIN_CV_GAP: float = 0.10
+# Below this score, both in-sample and cross-validated, the model is
+# flagged as underfitting (not learning the training data well enough).
+MIN_ACCEPTABLE_SCORE: float = 0.60
+
 # Hyperparameters selected via GridSearchCV in Trabajo 1's model-selection
 # notebook (best F1 among Logistic Regression / Random Forest / Gradient
 # Boosting / SVM).
@@ -101,6 +143,7 @@ ROOT_DIR: Path = Path(__file__).resolve().parents[3]
 DEFAULT_FEATURES_PATH: Path = ROOT_DIR / "data" / "04_feature" / "corazon_features.parquet"
 DEFAULT_MODEL_PATH: Path = ROOT_DIR / "models" / "heart_disease_classifier.pkl"
 DEFAULT_METRICS_PATH: Path = ROOT_DIR / "models" / "train_metrics.json"
+DEFAULT_COMPARISON_PLOT_PATH: Path = ROOT_DIR / "models" / "train_cv_test_comparison.png"
 
 
 class TrainingDataError(ValueError):
@@ -273,12 +316,18 @@ def train_model(
 def evaluate_model(
     model: RandomForestClassifier, X_test: pd.DataFrame, y_test: pd.Series
 ) -> dict[str, Any]:
-    """Evaluate the fitted classifier on the held-out test split.
+    """Score the fitted classifier on ``X_test``/``y_test``.
 
     Includes accuracy, precision, recall, F1 and AUC-ROC - appropriate for
     a binary classification problem where, in this clinical context, missed
     positive cases (false negatives) and false alarms both carry real cost,
     so no single metric alone is enough.
+
+    Named for its main use (scoring the held-out test split), but also
+    reused in ``run_train_pipeline`` to score the model on the TRAINING
+    split itself (an in-sample score) for the train/CV/test comparison in
+    ``analyze_generalization`` - the ``n_test_samples`` key just means "how
+    many rows were scored" in that case, not necessarily the test split.
     """
     y_pred = model.predict(X_test)
     y_proba = model.predict_proba(X_test)[:, 1]
@@ -293,7 +342,7 @@ def evaluate_model(
         "n_test_samples": len(y_test),
     }
     logger.info(
-        "Test metrics: accuracy=%.4f precision=%.4f recall=%.4f f1=%.4f roc_auc=%.4f",
+        "Evaluation metrics: accuracy=%.4f precision=%.4f recall=%.4f f1=%.4f roc_auc=%.4f",
         metrics["accuracy"],
         metrics["precision"],
         metrics["recall"],
@@ -303,13 +352,189 @@ def evaluate_model(
     return metrics
 
 
+def cross_validate_model(
+    model: RandomForestClassifier,
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    n_folds: int = CV_FOLDS,
+) -> dict[str, Any]:
+    """Cross-validate ``model`` on the training data with ``StratifiedKFold``.
+
+    Independent and testable on its own: takes an UNFITTED model (it clones
+    and fits it internally, once per fold) plus the training data, and
+    returns per-metric fold statistics. Stratified so every fold keeps
+    roughly the same positive-class rate as the full training set - see the
+    module docstring for why this (and not plain K-Fold or TimeSeriesSplit)
+    is the right strategy here.
+
+    Also collects the in-fold TRAIN score for each metric (``return_train_
+    score=True``), not just the held-out fold score: comparing the two is
+    part of the overfitting/underfitting analysis in
+    ``analyze_generalization``.
+    """
+    cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=RANDOM_STATE)
+    cv_output = cross_validate(
+        model,
+        X_train,
+        y_train,
+        cv=cv,
+        scoring=CV_SCORING,
+        return_train_score=True,
+    )
+
+    metrics: dict[str, dict[str, float]] = {}
+    for name in CV_SCORING:
+        cv_scores = cv_output[f"test_{name}"]
+        train_scores = cv_output[f"train_{name}"]
+        metrics[name] = {
+            "cv_mean": float(cv_scores.mean()),
+            "cv_std": float(cv_scores.std()),
+            "train_mean": float(train_scores.mean()),
+            "train_std": float(train_scores.std()),
+        }
+
+    logger.info(
+        "%d-fold CV: %s",
+        n_folds,
+        ", ".join(f"{name}={metrics[name]['cv_mean']:.4f}" for name in CV_SCORING),
+    )
+    return {"n_folds": n_folds, "metrics": metrics}
+
+
+def analyze_generalization(
+    train_metrics: dict[str, Any],
+    cv_metrics: dict[str, dict[str, float]],
+    test_metrics: dict[str, Any],
+    primary_metric: str = GENERALIZATION_PRIMARY_METRIC,
+) -> dict[str, Any]:
+    """Compare train / cross-validation / test scores and flag over- or
+    underfitting, with concrete next steps - not just a label.
+
+    Independent and testable on its own: takes three plain metric dicts
+    (no model or data needed), so valid and invalid generalization patterns
+    can be tested directly without training anything.
+
+    Diagnosis (based on ``primary_metric``, F1 by default - see
+    ``evaluate_model`` for why F1 is the metric this project optimizes for):
+    - "underfitting": both the in-sample train score and the cross
+      -validated score are below ``MIN_ACCEPTABLE_SCORE``. The model isn't
+      capturing the pattern even on data it was fit on.
+    - "overfitting": the train score exceeds the cross-validated score by
+      more than ``MAX_TRAIN_CV_GAP``. The model fits training data far
+      better than it generalizes to unseen folds.
+    - "acceptable_fit": neither of the above.
+    Regardless of diagnosis, also flags a large cv/test gap: cross
+    -validation and the held-out test set are two independent generalization
+    estimates, and if they disagree substantially the test split itself may
+    be too small or non-representative to trust on its own.
+    """
+    train_score = float(train_metrics[primary_metric])
+    cv_score = float(cv_metrics[primary_metric]["cv_mean"])
+    test_score = float(test_metrics[primary_metric])
+    train_cv_gap = train_score - cv_score
+    cv_test_gap = abs(cv_score - test_score)
+
+    recommendations: list[str] = []
+    if train_score < MIN_ACCEPTABLE_SCORE and cv_score < MIN_ACCEPTABLE_SCORE:
+        diagnosis = "underfitting"
+        recommendations = [
+            "Increase model capacity (e.g. higher max_depth or n_estimators).",
+            "Add or engineer more informative features.",
+            "Check for label noise or a genuinely weak signal in the data.",
+        ]
+    elif train_cv_gap > MAX_TRAIN_CV_GAP:
+        diagnosis = "overfitting"
+        recommendations = [
+            "Reduce model complexity (lower max_depth, raise min_samples_split "
+            "or min_samples_leaf).",
+            "Collect more training data if possible.",
+            "Revisit features for ones that let the model memorize noise.",
+        ]
+    else:
+        diagnosis = "acceptable_fit"
+
+    if cv_test_gap > MAX_TRAIN_CV_GAP:
+        recommendations.append(
+            f"Cross-validation ({cv_score:.3f}) and test ({test_score:.3f}) "
+            f"{primary_metric} disagree by more than {MAX_TRAIN_CV_GAP:.0%}: "
+            "the test split may be too small or unrepresentative to trust "
+            "alone - rely on the cross-validated estimate."
+        )
+
+    result = {
+        "primary_metric": primary_metric,
+        "train_score": train_score,
+        "cv_score": cv_score,
+        "test_score": test_score,
+        "train_cv_gap": train_cv_gap,
+        "cv_test_gap": cv_test_gap,
+        "diagnosis": diagnosis,
+        "recommendations": recommendations,
+    }
+
+    log_message = (
+        f"Generalization ({primary_metric}): train={train_score:.4f} "
+        f"cv={cv_score:.4f} test={test_score:.4f} -> {diagnosis}"
+    )
+    if diagnosis == "acceptable_fit":
+        logger.info(log_message)
+    else:
+        logger.warning(log_message)
+    return result
+
+
+def plot_train_cv_test_comparison(
+    train_metrics: dict[str, Any],
+    cv_metrics: dict[str, dict[str, float]],
+    test_metrics: dict[str, Any],
+    output_path: Path,
+    metric_names: list[str] = CV_SCORING,
+) -> Path:
+    """Save a grouped bar chart comparing train / CV / test scores per metric.
+
+    Visual evidence to accompany the JSON metrics: makes the
+    over/underfitting comparison legible at a glance instead of requiring a
+    read of ``train_metrics.json``. CV bars include the fold-to-fold std as
+    an error bar, since a single CV mean without spread can hide an
+    unstable model.
+    """
+    train_values = [float(train_metrics[m]) for m in metric_names]
+    cv_values = [cv_metrics[m]["cv_mean"] for m in metric_names]
+    cv_errors = [cv_metrics[m]["cv_std"] for m in metric_names]
+    test_values = [float(test_metrics[m]) for m in metric_names]
+
+    x = range(len(metric_names))
+    width = 0.25
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.bar([i - width for i in x], train_values, width, label="Train (in-sample)")
+    ax.bar(list(x), cv_values, width, yerr=cv_errors, capsize=4, label="Cross-validation")
+    ax.bar([i + width for i in x], test_values, width, label="Test (held-out)")
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(metric_names)
+    ax.set_ylim(0, 1.05)
+    ax.set_ylabel("Score")
+    ax.set_title("Train vs. cross-validation vs. test performance")
+    ax.legend()
+    fig.tight_layout()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path)
+    plt.close(fig)
+
+    logger.info("Saved train/CV/test comparison plot to %s", output_path)
+    return output_path
+
+
 def run_train_pipeline(
     features_path: Path = DEFAULT_FEATURES_PATH,
     model_path: Path = DEFAULT_MODEL_PATH,
     metrics_path: Path = DEFAULT_METRICS_PATH,
+    comparison_plot_path: Path = DEFAULT_COMPARISON_PLOT_PATH,
 ) -> dict[str, Any]:
     """Run the full training pipeline: load -> split -> validate split ->
-    train -> evaluate -> persist.
+    train -> evaluate -> cross-validate -> analyze generalization -> persist.
 
     Nothing is trained or persisted if ``validate_train_test_split`` raises
     ``TrainTestSplitError`` (the same row index found in both train and
@@ -325,6 +550,20 @@ def run_train_pipeline(
     model = train_model(model, X_train, y_train)
     metrics = evaluate_model(model, X_test, y_test)
     metrics["train_test_validation"] = split_validation
+
+    # Model validation: in-sample train score, cross-validated score and the
+    # held-out test score above, compared side by side (see module docstring).
+    train_scores = evaluate_model(model, X_train, y_train)
+    cv_results = cross_validate_model(build_model(), X_train, y_train)
+    generalization = analyze_generalization(train_scores, cv_results["metrics"], metrics)
+    plot_path = plot_train_cv_test_comparison(
+        train_scores, cv_results["metrics"], metrics, comparison_plot_path
+    )
+
+    metrics["train_scores"] = train_scores
+    metrics["cross_validation"] = cv_results
+    metrics["generalization_analysis"] = generalization
+    metrics["comparison_plot_path"] = str(plot_path)
 
     model_path.parent.mkdir(parents=True, exist_ok=True)
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
@@ -342,6 +581,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--features-path", type=Path, default=DEFAULT_FEATURES_PATH)
     parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--metrics-path", type=Path, default=DEFAULT_METRICS_PATH)
+    parser.add_argument("--comparison-plot-path", type=Path, default=DEFAULT_COMPARISON_PLOT_PATH)
     return parser.parse_args()
 
 
@@ -352,6 +592,7 @@ def main() -> None:
         features_path=args.features_path,
         model_path=args.model_path,
         metrics_path=args.metrics_path,
+        comparison_plot_path=args.comparison_plot_path,
     )
 
 

@@ -14,5 +14,80 @@
       36
     ]
   ],
-  "n_test_samples": 92
+  "n_test_samples": 92,
+  "train_test_validation": {
+    "warnings": [
+      "12.0% of test rows are exact duplicates, feature-for-feature, of a train row (expected up to 5%). Verify this comes from imputation collapsing distinct records, not a partitioning bug."
+    ],
+    "overlap_fraction": 0.11956521739130435,
+    "drifted_features": [],
+    "drifted_feature_fraction": 0.0,
+    "train_positive_rate": 0.4782608695652174,
+    "test_positive_rate": 0.4782608695652174,
+    "label_drift": 0.0
+  },
+  "train_scores": {
+    "accuracy": 0.907608695652174,
+    "precision": 0.9382716049382716,
+    "recall": 0.8636363636363636,
+    "f1": 0.8994082840236687,
+    "roc_auc": 0.970999053030303,
+    "confusion_matrix": [
+      [
+        182,
+        10
+      ],
+      [
+        24,
+        152
+      ]
+    ],
+    "n_test_samples": 368
+  },
+  "cross_validation": {
+    "n_folds": 5,
+    "metrics": {
+      "accuracy": {
+        "cv_mean": 0.817660125879304,
+        "cv_std": 0.04951002841013409,
+        "train_mean": 0.9130335524040124,
+        "train_std": 0.015170776752496921
+      },
+      "precision": {
+        "cv_mean": 0.836977468820448,
+        "cv_std": 0.06091664099946876,
+        "train_mean": 0.9456814398860741,
+        "train_std": 0.013467689836531183
+      },
+      "recall": {
+        "cv_mean": 0.7725396825396824,
+        "cv_std": 0.0870553526024084,
+        "train_mean": 0.8678622087132727,
+        "train_std": 0.02013193406463372
+      },
+      "f1": {
+        "cv_mean": 0.8005043939620295,
+        "cv_std": 0.058585198189985366,
+        "train_mean": 0.9050820248059287,
+        "train_std": 0.017060503505285856
+      },
+      "roc_auc": {
+        "cv_mean": 0.9017797699376647,
+        "cv_std": 0.05005304787074869,
+        "train_mean": 0.9760357304322975,
+        "train_std": 0.0032384487526427703
+      }
+    }
+  },
+  "generalization_analysis": {
+    "primary_metric": "f1",
+    "train_score": 0.8994082840236687,
+    "cv_score": 0.8005043939620295,
+    "test_score": 0.8470588235294118,
+    "train_cv_gap": 0.09890389006163913,
+    "cv_test_gap": 0.046554429567382205,
+    "diagnosis": "acceptable_fit",
+    "recommendations": []
+  },
+  "comparison_plot_path": "/mnt/c/Users/jhonn/Heart-project/Heart-project/models/train_cv_test_comparison.png"
 }
