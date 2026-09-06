@@ -7,6 +7,7 @@ from src.pipelines.feature_pipeline.feature_pipeline import (
     build_preprocessor,
     clean_invalid_rows,
     load_raw_data,
+    normalize_categorical,
     run_feature_pipeline,
     validate_raw_data,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "build_preprocessor",
     "clean_invalid_rows",
     "load_raw_data",
+    "normalize_categorical",
     "run_feature_pipeline",
     "validate_raw_data",
 ]
