@@ -12,16 +12,22 @@ import pytest
 from sklearn.ensemble import RandomForestClassifier
 
 from src.pipelines.training_pipeline.train_pipeline import (
+    CV_SCORING,
     MAX_LABEL_DRIFT,
+    MAX_TRAIN_CV_GAP,
     MAX_TRAIN_TEST_OVERLAP,
+    MIN_ACCEPTABLE_SCORE,
     MODEL_PARAMS,
     SPLIT_COL,
     TARGET,
     TrainingDataError,
     TrainTestSplitError,
+    analyze_generalization,
     build_model,
+    cross_validate_model,
     evaluate_model,
     load_features,
+    plot_train_cv_test_comparison,
     run_train_pipeline,
     split_train_test,
     train_model,
@@ -37,6 +43,10 @@ EXPECTED_METRIC_KEYS = {
     "confusion_matrix",
     "n_test_samples",
     "train_test_validation",
+    "train_scores",
+    "cross_validation",
+    "generalization_analysis",
+    "comparison_plot_path",
 }
 EXPECTED_SPLIT_VALIDATION_KEYS = {
     "warnings",
@@ -47,9 +57,22 @@ EXPECTED_SPLIT_VALIDATION_KEYS = {
     "test_positive_rate",
     "label_drift",
 }
+EXPECTED_CV_METRIC_STAT_KEYS = {"cv_mean", "cv_std", "train_mean", "train_std"}
+EXPECTED_GENERALIZATION_KEYS = {
+    "primary_metric",
+    "train_score",
+    "cv_score",
+    "test_score",
+    "train_cv_gap",
+    "cv_test_gap",
+    "diagnosis",
+    "recommendations",
+}
 CONFUSION_MATRIX_SIZE = 2
 N_TRAIN_ROWS = 60
 N_TEST_ROWS = 20
+CV_FOLDS_DEFAULT = 5
+CV_FOLDS_ALT = 3
 
 
 def _build_features_df(n_train: int = N_TRAIN_ROWS, n_test: int = N_TEST_ROWS) -> pd.DataFrame:
@@ -273,7 +296,14 @@ def test_evaluate_model_returns_expected_keys_and_valid_ranges() -> None:
 
     metrics = evaluate_model(model, X_test, y_test)
 
-    assert set(metrics.keys()) == EXPECTED_METRIC_KEYS - {"train_test_validation"}
+    non_split_keys = EXPECTED_METRIC_KEYS - {
+        "train_test_validation",
+        "train_scores",
+        "cross_validation",
+        "generalization_analysis",
+        "comparison_plot_path",
+    }
+    assert set(metrics.keys()) == non_split_keys
     for key in ("accuracy", "precision", "recall", "f1", "roc_auc"):
         value = metrics[key]
         assert isinstance(value, float)
@@ -287,6 +317,109 @@ def test_evaluate_model_returns_expected_keys_and_valid_ranges() -> None:
 
 
 # --------------------------------------------------------------------------
+# cross_validate_model
+# --------------------------------------------------------------------------
+
+
+def test_cross_validate_model_returns_stats_for_every_metric() -> None:
+    df = _build_features_df(n_train=200, n_test=100)
+    X_train, _, y_train, _ = split_train_test(df)
+
+    results = cross_validate_model(build_model(), X_train, y_train, n_folds=CV_FOLDS_DEFAULT)
+
+    assert results["n_folds"] == CV_FOLDS_DEFAULT
+    assert set(results["metrics"].keys()) == set(CV_SCORING)
+    for name in CV_SCORING:
+        stats = results["metrics"][name]
+        assert set(stats.keys()) == EXPECTED_CV_METRIC_STAT_KEYS
+        for stat_name in ("cv_mean", "train_mean"):
+            assert 0.0 <= stats[stat_name] <= 1.0
+        for stat_name in ("cv_std", "train_std"):
+            assert stats[stat_name] >= 0.0
+
+
+def test_cross_validate_model_respects_n_folds() -> None:
+    df = _build_features_df(n_train=200, n_test=100)
+    X_train, _, y_train, _ = split_train_test(df)
+
+    results_3 = cross_validate_model(build_model(), X_train, y_train, n_folds=CV_FOLDS_ALT)
+    results_5 = cross_validate_model(build_model(), X_train, y_train, n_folds=CV_FOLDS_DEFAULT)
+
+    assert results_3["n_folds"] == CV_FOLDS_ALT
+    assert results_5["n_folds"] == CV_FOLDS_DEFAULT
+
+
+# --------------------------------------------------------------------------
+# analyze_generalization
+# --------------------------------------------------------------------------
+
+
+def test_analyze_generalization_flags_overfitting_on_a_large_train_cv_gap() -> None:
+    train_metrics = {"f1": 0.99}
+    cv_metrics = {"f1": {"cv_mean": 0.99 - (MAX_TRAIN_CV_GAP + 0.1), "cv_std": 0.02}}
+    test_metrics = {"f1": 0.85}
+
+    result = analyze_generalization(train_metrics, cv_metrics, test_metrics)
+
+    assert set(result.keys()) == EXPECTED_GENERALIZATION_KEYS
+    assert result["diagnosis"] == "overfitting"
+    assert result["recommendations"]
+
+
+def test_analyze_generalization_flags_underfitting_when_both_scores_are_low() -> None:
+    train_metrics = {"f1": MIN_ACCEPTABLE_SCORE - 0.1}
+    cv_metrics = {"f1": {"cv_mean": MIN_ACCEPTABLE_SCORE - 0.15, "cv_std": 0.02}}
+    test_metrics = {"f1": MIN_ACCEPTABLE_SCORE - 0.12}
+
+    result = analyze_generalization(train_metrics, cv_metrics, test_metrics)
+
+    assert result["diagnosis"] == "underfitting"
+    assert result["recommendations"]
+
+
+def test_analyze_generalization_reports_acceptable_fit_when_scores_agree() -> None:
+    train_metrics = {"f1": 0.85}
+    cv_metrics = {"f1": {"cv_mean": 0.83, "cv_std": 0.02}}
+    test_metrics = {"f1": 0.84}
+
+    result = analyze_generalization(train_metrics, cv_metrics, test_metrics)
+
+    assert result["diagnosis"] == "acceptable_fit"
+    assert result["recommendations"] == []
+
+
+def test_analyze_generalization_flags_a_large_cv_test_disagreement() -> None:
+    train_metrics = {"f1": 0.80}
+    cv_metrics = {"f1": {"cv_mean": 0.79, "cv_std": 0.02}}
+    test_metrics = {"f1": 0.79 - (MAX_TRAIN_CV_GAP + 0.1)}
+
+    result = analyze_generalization(train_metrics, cv_metrics, test_metrics)
+
+    assert result["cv_test_gap"] > MAX_TRAIN_CV_GAP
+    assert any("disagree" in r for r in result["recommendations"])
+
+
+# --------------------------------------------------------------------------
+# plot_train_cv_test_comparison
+# --------------------------------------------------------------------------
+
+
+def test_plot_train_cv_test_comparison_saves_a_png(tmp_path: Path) -> None:
+    train_metrics = {name: 0.9 for name in CV_SCORING}
+    cv_metrics = {name: {"cv_mean": 0.8, "cv_std": 0.05} for name in CV_SCORING}
+    test_metrics = {name: 0.82 for name in CV_SCORING}
+    output_path = tmp_path / "comparison.png"
+
+    result_path = plot_train_cv_test_comparison(
+        train_metrics, cv_metrics, test_metrics, output_path
+    )
+
+    assert result_path == output_path
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
+
+
+# --------------------------------------------------------------------------
 # run_train_pipeline (end-to-end)
 # --------------------------------------------------------------------------
 
@@ -296,15 +429,18 @@ def test_run_train_pipeline_persists_model_and_metrics(tmp_path: Path) -> None:
     features_path = _write_parquet(df, tmp_path)
     model_path = tmp_path / "out" / "model.pkl"
     metrics_path = tmp_path / "out" / "metrics.json"
+    plot_path = tmp_path / "out" / "comparison.png"
 
     metrics = run_train_pipeline(
         features_path=features_path,
         model_path=model_path,
         metrics_path=metrics_path,
+        comparison_plot_path=plot_path,
     )
 
     assert model_path.exists()
     assert metrics_path.exists()
+    assert plot_path.exists()
 
     persisted_model = joblib.load(model_path)
     assert isinstance(persisted_model, RandomForestClassifier)
@@ -315,6 +451,11 @@ def test_run_train_pipeline_persists_model_and_metrics(tmp_path: Path) -> None:
     assert set(persisted_metrics["train_test_validation"].keys()) == (
         EXPECTED_SPLIT_VALIDATION_KEYS
     )
+    assert set(persisted_metrics["cross_validation"]["metrics"].keys()) == set(CV_SCORING)
+    assert set(persisted_metrics["generalization_analysis"].keys()) == (
+        EXPECTED_GENERALIZATION_KEYS
+    )
+    assert persisted_metrics["comparison_plot_path"] == str(plot_path)
 
 
 def test_run_train_pipeline_raises_and_does_not_persist_on_bad_input(
@@ -352,11 +493,13 @@ def test_run_train_pipeline_persists_and_warns_on_duplicated_feature_rows(
     features_path = _write_parquet(duplicated_df, tmp_path)
     model_path = tmp_path / "out" / "model.pkl"
     metrics_path = tmp_path / "out" / "metrics.json"
+    plot_path = tmp_path / "out" / "comparison.png"
 
     metrics = run_train_pipeline(
         features_path=features_path,
         model_path=model_path,
         metrics_path=metrics_path,
+        comparison_plot_path=plot_path,
     )
 
     assert model_path.exists()
