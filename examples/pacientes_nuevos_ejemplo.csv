@@ -1,0 +1,7 @@
+age,sex,chest_pain,rest_bp,chol,fbs,rest_ecg,max_hr,exang,old_peak,slope,ca,thal
+71,Female,nontypical,160,302,0.0,normal,162,0,0.4,1,2.0,normal
+58,Male,asymptomatic,128,216,0.0,left ventricular hypertrophy ,131,1,2.2,2,3.0,reversable
+65,Female,nonanginal,155,269,0.0,normal,148,0,0.8,1,0.0,normal
+48,Male,nonanginal,124,255,1.0,normal,175,0,0.0,1,2.0,normal
+57,Male,asymptomatic,165,289,1.0,left ventricular hypertrophy ,124,0,1.0,2,3.0,reversable
+35,Male,asymptomatic,120,198,0.0,normal,130,1,1.6,2,0.0,reversable
