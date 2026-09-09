@@ -1,8 +1,10 @@
 from src.pipelines.feature_pipeline.feature_pipeline import (
     CAT_COLS,
     NUM_COLS,
+    NUMERIC_RANGES,
     SPLIT_COL,
     TARGET,
+    VALID_CATEGORIES,
     DataValidationError,
     build_preprocessor,
     clean_invalid_rows,
@@ -14,9 +16,11 @@ from src.pipelines.feature_pipeline.feature_pipeline import (
 
 __all__ = [
     "CAT_COLS",
+    "NUMERIC_RANGES",
     "NUM_COLS",
     "SPLIT_COL",
     "TARGET",
+    "VALID_CATEGORIES",
     "DataValidationError",
     "build_preprocessor",
     "clean_invalid_rows",

@@ -131,6 +131,52 @@ class TestLoadNewData:
         assert "disease" not in df.columns
         assert "split" not in df.columns
 
+    def test_rejects_unrecognized_category_value(
+        self, tmp_path: Path, synthetic_new_data: pd.DataFrame
+    ) -> None:
+        # "male" (lowercase) is not in VALID_CATEGORIES["sex"] ("Male"/
+        # "Female"): OneHotEncoder(handle_unknown="ignore") would otherwise
+        # silently zero out both sex columns instead of raising, so this
+        # must be caught here, before the data ever reaches the model.
+        bad = synthetic_new_data.copy()
+        bad.loc[0, "sex"] = "male"
+        data_path = tmp_path / "bad_category.csv"
+        bad.to_csv(data_path, index=False)
+
+        with pytest.raises(InferenceDataError, match="sex"):
+            load_new_data(data_path)
+
+    def test_allows_missing_category_values(
+        self, tmp_path: Path, synthetic_new_data: pd.DataFrame
+    ) -> None:
+        # A missing (NaN) categorical value is not an "unrecognized
+        # category" - it mirrors the nullable categorical columns in
+        # feature_pipeline.RAW_SCHEMA and must pass through untouched.
+        missing = synthetic_new_data.copy()
+        missing.loc[0, "thal"] = None
+        data_path = tmp_path / "missing_category.csv"
+        missing.to_csv(data_path, index=False)
+
+        df = load_new_data(data_path)
+
+        assert pd.isna(df.loc[0, "thal"])
+
+    def test_rejects_file_that_already_has_prediction_columns(
+        self, tmp_path: Path, synthetic_new_data: pd.DataFrame
+    ) -> None:
+        # Someone re-uploading a previous predictions output as if it were
+        # new input data: silently accepting it would later concat a
+        # duplicate-named column onto the new predictions and break every
+        # result[PREDICTION_COL] lookup downstream in a confusing way.
+        looks_like_output = synthetic_new_data.copy()
+        looks_like_output[PREDICTION_COL] = 0
+        looks_like_output[PREDICTION_PROBA_COL] = 0.1
+        data_path = tmp_path / "looks_like_output.csv"
+        looks_like_output.to_csv(data_path, index=False)
+
+        with pytest.raises(InferenceDataError, match=PREDICTION_COL):
+            load_new_data(data_path)
+
 
 class TestTransformNewData:
     def test_output_shape_matches_preprocessor(

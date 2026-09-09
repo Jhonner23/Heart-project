@@ -28,6 +28,7 @@ from sklearn.compose import ColumnTransformer
 from src.pipelines.feature_pipeline.feature_pipeline import (
     CAT_COLS,
     NUM_COLS,
+    VALID_CATEGORIES,
     normalize_categorical,
 )
 
@@ -60,6 +61,34 @@ def load_preprocessor(
     return joblib.load(preprocessor_path)
 
 
+def _validate_categories(df: pd.DataFrame) -> None:
+    """Reject categorical values the fitted preprocessor doesn't recognize.
+
+    ``OneHotEncoder(handle_unknown="ignore")`` silently encodes an unknown
+    category as all-zeros instead of raising - e.g. ``sex="male"`` (lowercase)
+    would be encoded as neither Male nor Female, and the model would still
+    happily return a prediction for that nonsense row with no warning at
+    all. This checks every categorical column against the same
+    ``VALID_CATEGORIES`` the training data was validated against, and fails
+    loudly (blocking ALL predictions for the file) instead of letting a
+    typo silently degrade a prediction. Missing values (NaN) are allowed
+    through, matching the nullable categorical columns in
+    ``feature_pipeline.RAW_SCHEMA``.
+    """
+    errors: list[str] = []
+    for col in CAT_COLS:
+        valid = set(VALID_CATEGORIES[col])
+        observed = set(df[col].dropna().unique())
+        invalid = observed - valid
+        if invalid:
+            errors.append(f"{col}: {sorted(invalid)} (valid: {sorted(valid)})")
+
+    if errors:
+        raise InferenceDataError(
+            "New data has unrecognized categorical value(s):\n" + "\n".join(errors)
+        )
+
+
 def load_new_data(data_path: Path) -> pd.DataFrame:
     """Load new, unlabeled raw data for inference.
 
@@ -67,6 +96,18 @@ def load_new_data(data_path: Path) -> pd.DataFrame:
     (numeric casting, categorical normalization) so the fitted preprocessor
     sees inputs shaped exactly like the training data, but requires only
     the feature columns - not the (unknown, to-be-predicted) target.
+
+    Also validates every categorical value against ``VALID_CATEGORIES``
+    (see ``_validate_categories``): a value the preprocessor's
+    ``OneHotEncoder`` would otherwise ignore silently is instead a fatal,
+    fully-described error here - no partial/degraded predictions.
+
+    Rejects a file that already contains ``PREDICTION_COL``/
+    ``PREDICTION_PROBA_COL`` (e.g. someone re-uploading a previous
+    predictions output as if it were new input data): silently letting it
+    through would concatenate a duplicate-named column onto the new
+    predictions in ``run_inference_pipeline``, breaking every downstream
+    ``result[PREDICTION_COL]`` lookup in a confusing way.
     """
     logger.info("Loading new data from %s", data_path)
     df = pd.read_csv(data_path)
@@ -77,10 +118,20 @@ def load_new_data(data_path: Path) -> pd.DataFrame:
             f"New data is missing expected feature columns: {sorted(missing_cols)}"
         )
 
+    reserved_cols = {PREDICTION_COL, PREDICTION_PROBA_COL} & set(df.columns)
+    if reserved_cols:
+        raise InferenceDataError(
+            f"New data already contains reserved output column(s) {sorted(reserved_cols)} "
+            "- make sure you're uploading the INPUT file (patient data), not a "
+            "previous predictions output."
+        )
+
     for col in NUM_COLS:
         df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
     for col in CAT_COLS:
         df[col] = df[col].map(normalize_categorical).astype(object)
+
+    _validate_categories(df)
 
     return df
 
